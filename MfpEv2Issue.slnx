@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="src/MfpEv2Issue/MfpEv2Issue.csproj" />
+  <Project Path="examples/ReaderInfo/ReaderInfo.csproj" />
+  <Project Path="tests/IssuingChecks/IssuingChecks.csproj" />
+</Solution>
