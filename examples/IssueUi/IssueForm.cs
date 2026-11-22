@@ -7,6 +7,7 @@ internal sealed class IssueForm : Form
     private readonly ComboBox readers = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
     private readonly Button refresh = new() { Text = "Refresh", AutoSize = true };
     private readonly Button issue = new() { Text = "Issue card", AutoSize = true, Enabled = false };
+    private readonly Button testMasterKey = new() { Text = "Test 9000", AutoSize = true, Enabled = false };
     private readonly Button clear = new() { Text = "Clear logs", AutoSize = true };
     private readonly Button save = new() { Text = "Save logs…", AutoSize = true };
     private readonly ComboBox startMode = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 190 };
@@ -59,7 +60,7 @@ internal sealed class IssueForm : Form
             Text = "2KB · sectors 0–31 · SL1SL3Mix\nPlace one card on the reader and keep it there until issuing finishes.",
             AutoSize = true, Margin = new Padding(0, 0, 0, 14)
         });
-        var readerRow = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 4, Margin = Padding.Empty };
+        var readerRow = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 5, Margin = Padding.Empty };
         readerRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         readerRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         readerRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -68,8 +69,10 @@ internal sealed class IssueForm : Form
         readerRow.Controls.Add(readers);
         readerRow.Controls.Add(refresh);
         readerRow.Controls.Add(issue);
+        readerRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        readerRow.Controls.Add(testMasterKey);
         readerRow.Controls.Add(uid, 0, 1);
-        readerRow.SetColumnSpan(uid, 4);
+        readerRow.SetColumnSpan(uid, 5);
         layout.Controls.Add(readerRow);
         startMode.Items.AddRange(new object[] { "Auto (activation SAK)", "Start from SL0", "Continue from SL1" });
         startMode.SelectedIndex = 0;
@@ -97,7 +100,7 @@ internal sealed class IssueForm : Form
         keyPanel.SetColumnSpan(overridesSummary, 2);
         var keyHelp = new Label
         {
-            Text = "Up to 16 hex bytes per key; short entries are padded on the right with zeroes.\nSL0 writes sector A/B and control keys. Continue from SL1 authenticates with sector Key B and 9007.",
+            Text = "Up to 16 hex bytes per key; short entries are padded on the right with zeroes.\nSL0: write keys/configuration, commit, then switch sectors. SL1: continue without rewriting keys.",
             AutoSize = true, Margin = new Padding(0, 6, 0, 0)
         };
         keyPanel.Controls.Add(keyHelp, 0, keyRow);
@@ -117,9 +120,11 @@ internal sealed class IssueForm : Form
         readers.SelectedIndexChanged += (_, _) =>
         {
             issue.Enabled = !busy && readers.SelectedItem is string;
+            testMasterKey.Enabled = issue.Enabled;
             uid.Text = "UID: —";
         };
         issue.Click += async (_, _) => await IssueAsync();
+        testMasterKey.Click += async (_, _) => await TestMasterKeyAsync();
         clear.Click += (_, _) => logs.Clear();
         save.Click += (_, _) => SaveLogs();
         editOverrides.Click += (_, _) =>
@@ -151,6 +156,7 @@ internal sealed class IssueForm : Form
         sectorKey.Enabled = switchKey.Enabled = editOverrides.Enabled = !value;
         foreach (var input in controlKeyInputs.Values) input.Enabled = !value;
         issue.Enabled = !value && readers.SelectedItem is string;
+        testMasterKey.Enabled = issue.Enabled;
         UseWaitCursor = value;
     }
 
@@ -208,12 +214,22 @@ internal sealed class IssueForm : Form
         }
         int mode = startMode.SelectedIndex;
         bool useRaw = raw.Checked;
+        const bool logKeyBytes = true;
         SetBusy(true);
         uid.Text = "UID: reading…";
         status.Text = "Issuing… keep the card on the reader.";
         Log($"Opening reader: {readerName}");
         Log($"Flow: {startMode.Text}; post-activation transport: {(useRaw ? "raw" : "wrapped")}");
         Log(overridesSummary.Text);
+        if (logKeyBytes)
+        {
+            Log("Key bytes enabled in displayed and saved logs. Configured profile for this run:");
+            foreach (var (name, address) in new[] { ("MASTER", 0x9000), ("CONF", 0x9001), ("L3SWITCH", 0x9003),
+                ("L3SECTORSWITCH", 0x9006), ("MIXSECTORSWITCH", 0x9007) })
+                Log($"Configured key 0x{address:X4}: {Convert.ToHexString(keys[name])}");
+            for (int sector = 0; sector < 32; sector++)
+                Log($"Configured sector {sector:D2} AES key: {Convert.ToHexString(keys[$"SECTOR{sector}"])}");
+        }
         var progress = new Progress<string>(Log);
         var uidProgress = new Progress<string>(value => uid.Text = $"UID: {value}");
         try
@@ -221,7 +237,7 @@ internal sealed class IssueForm : Form
             await Task.Run(() =>
             {
                 void Report(string text) => ((IProgress<string>)progress).Report(text);
-                using var channel = new PcscMifarePlusChannel(readerName);
+                using var channel = new PcscMifarePlusChannel(readerName) { Logger = Report, LogKeyBytes = logKeyBytes };
                 var ctrl = new MifarePlusController(channel);
                 var cardUid = ctrl.GetCardInformation().Uid;
                 if (cardUid is null || cardUid.Length is not (4 or 7 or 10))
@@ -246,6 +262,59 @@ internal sealed class IssueForm : Form
             status.Text = "Issuing stopped. See logs for the failed stage.";
             Log($"ERROR ({ex.GetType().Name}): {ex.Message}");
             Log("Earlier successful card changes remain applied. Existing SL1 cards need SectorSwitch enabled and keys matching the inputs.");
+        }
+        finally { SetBusy(false); }
+    }
+
+    private async Task TestMasterKeyAsync()
+    {
+        if (readers.SelectedItem is not string readerName || busy) return;
+        byte[] masterKey;
+        try
+        {
+            masterKey = Convert.FromHexString(MifarePlusKeys.NormalizeAesKeyHex(controlKeyInputs["MASTER"].Text, "9000 master key"));
+        }
+        catch (ArgumentException ex)
+        {
+            status.Text = "Invalid master key. No card operation started.";
+            Log(ex.Message);
+            return;
+        }
+        bool useRaw = raw.Checked;
+        const bool logKeyBytes = true;
+        SetBusy(true);
+        uid.Text = "UID: reading…";
+        status.Text = "Testing master-key authentication…";
+        Log($"Test 9000: reader={readerName}; transport={(useRaw ? "raw" : "wrapped")}. Authentication only; no writes or commit.");
+        if (logKeyBytes) Log($"Configured key 0x9000: {Convert.ToHexString(masterKey)}");
+        var progress = new Progress<string>(Log);
+        var uidProgress = new Progress<string>(value => uid.Text = $"UID: {value}");
+        try
+        {
+            await Task.Run(() =>
+            {
+                void Report(string message) => ((IProgress<string>)progress).Report(message);
+                using var channel = new PcscMifarePlusChannel(readerName) { Logger = Report, LogKeyBytes = logKeyBytes };
+                var ctrl = new MifarePlusController(channel);
+                var cardUid = ctrl.GetCardInformation().Uid;
+                if (cardUid is null || cardUid.Length is not (4 or 7 or 10))
+                    throw new MifarePlusException("Reader did not return a valid UID.");
+                ((IProgress<string>)uidProgress).Report(Convert.ToHexString(cardUid));
+                Report($"Card UID: {Convert.ToHexString(cardUid)}");
+                ctrl.ResetCard();
+                var activation = ctrl.Iso14443_4A_Active();
+                if (!activation.IsOk) throw new MifarePlusException("Test 9000: ISO 14443-4A activation failed.");
+                Report("Test 9000: authenticating with 70 00 90 00 (no capability bytes)");
+                var session = ctrl.FirstAuth(masterKey, 0x9000, useRaw, Array.Empty<byte>());
+                Report($"Test 9000: SUCCESS; returned RndA verified; TI={Convert.ToHexString(session.Ti)}");
+            });
+            status.Text = "9000 authentication succeeded. No card data was written.";
+        }
+        catch (Exception ex)
+        {
+            if (uid.Text == "UID: reading…") uid.Text = "UID: unavailable";
+            status.Text = "9000 authentication failed. See APDU logs.";
+            Log($"Test 9000 FAILED ({ex.GetType().Name}): {ex.Message}");
         }
         finally { SetBusy(false); }
     }

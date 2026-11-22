@@ -21,9 +21,9 @@ Require(channel.Commands[33][1] == 1 && channel.Commands[34][1] == 3, "Control k
 Require(channel.Commands[35][1] == 6 && channel.Commands[35][2] == 0x90 &&
     channel.Commands[36][1] == 7 && channel.Commands[36][2] == 0x90, "Sector switch key address mismatch.");
 Require(channel.Commands.Take(37).All(c => c.Skip(3).All(b => b == 0)), "Default keys must be zero-filled.");
-Require(channel.Commands[37].SequenceEqual(Convert.FromHexString("A800B0000F00AAAA0155000000000000000000")),
-    "B000 must enable mixed-mode switching, SL1 activation parameters, and ISO-4 activation.");
-Require(channel.Commands[^1].SequenceEqual(new byte[] { 0xAA }), "Commit must be last.");
+Require(channel.Commands[37].SequenceEqual(Convert.FromHexString("A800B0000F00AAAA0055000000000000000000")),
+    "B000 must enable mixed-mode switching and ISO-4 while leaving ISOParamUse unchanged.");
+Require(channel.Commands[^1].SequenceEqual(new byte[] { 0xAA }), "CommitPerso must follow all personalization writes.");
 
 foreach (string invalid in new[] { "SECTOR15", "MASTER", "L3SECTORSWITCH", "MIXSECTORSWITCH" })
 {
@@ -65,8 +65,8 @@ Require(channel.Commands.Count == 0, "Invalid configuration must fail before any
 var baseBlock = Enumerable.Range(0, 16).Select(i => (byte)i).ToArray();
 var mixedBlock = MifarePlusConfiguration.CreateSL1SL3MixBlock(baseBlock);
 Require(baseBlock[3] == 3 && baseBlock[4] == 4, "Configuration builder must not modify its input.");
-Require(mixedBlock[3] == 0xAA && mixedBlock[4] == 0xAA && mixedBlock[5] == 0x01 && mixedBlock[6] == 0x55,
-    "Mixed-mode builder must explicitly select SL1 activation and enable ISO-4 even with a base block.");
+Require(mixedBlock[3] == 0xAA && mixedBlock[4] == 0xAA && mixedBlock[5] == 0x00 && mixedBlock[6] == 0x55,
+    "Mixed-mode builder must emit ISOParamUse no-change and enable ISO-4 even with a base block.");
 Require(mixedBlock.Where((_, i) => i < 3 || i > 6)
     .SequenceEqual(baseBlock.Where((_, i) => i < 3 || i > 6)), "Unrelated configuration bytes must be preserved.");
 Require(MifarePlusConfiguration.CreateSL1SL3MixBlock().Skip(7).All(b => b == 0),
@@ -74,7 +74,7 @@ Require(MifarePlusConfiguration.CreateSL1SL3MixBlock().Skip(7).All(b => b == 0),
 
 channel = new FakeChannel();
 CardPerso.SL0Operations(new MifarePlusController(channel));
-Require(channel.Commands.Count == 71, "Default overload must write all 32 sectors, five control keys, B000, and commit.");
+Require(channel.Commands.Count == 71, "Default overload must write all 32 sectors, five control keys, B000, then commit.");
 
 channel = new FakeChannel();
 MifarePlusKeys.WriteKeys(new MifarePlusController(channel), MifarePlusKeys.CreateDefaultKeySet(56), sectorCount: 56);
@@ -83,6 +83,7 @@ Require(channel.Commands.Count == 117 && channel.Commands[111][1] == 0x6F && cha
 SectorSwitchChecks.Run();
 FirstAuthChecks.Run();
 SectorSwitchTraceChecks.Run();
+ApduTraceChecks.Run();
 Console.WriteLine("Passed: personalization and sector switching checks.");
 
 sealed class FakeChannel : IMifarePlusChannel

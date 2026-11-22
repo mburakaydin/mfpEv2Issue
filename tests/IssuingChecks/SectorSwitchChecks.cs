@@ -80,8 +80,8 @@ static class SectorSwitchChecks
             catch (ArgumentException) { }
         }
         var explicitControlCard = new IssuingCard(configuredKeys) { InitialSak = 0x18 };
-        CardPerso.Issue2KbSL1SL3MixFromCurrentState(new MifarePlusController(explicitControlCard), configuredKeys);
-        Check(explicitControlCard.Events.SequenceEqual(new[] { "detect", "reconnect", "activate" }.Concat(SwitchSequence(32))),
+        CardPerso.Continue2KbSL1ToSL1SL3Mix(new MifarePlusController(explicitControlCard), configuredKeys);
+        Check(explicitControlCard.Events.SequenceEqual(new[] { "reconnect", "activate" }.Concat(SwitchSequence(32))),
             "SL1 flow must use entered 9007 and sector keys without writing other control keys.");
         foreach (bool rawMixed in new[] { false, true })
         {
@@ -129,8 +129,8 @@ static class SectorSwitchChecks
         {
             var uiCard = new IssuingCard(uiKeys) { InitialSak = 0x18, ExpectRawSwitching = rawUi };
             var messages = new List<string>();
-            CardPerso.Issue2KbSL1SL3MixFromCurrentState(new MifarePlusController(uiCard), uiKeys, messages.Add, rawUi);
-            Check(uiCard.Events.SequenceEqual(new[] { "detect", "reconnect", "activate" }.Concat(SwitchSequence(32))),
+            CardPerso.Continue2KbSL1ToSL1SL3Mix(new MifarePlusController(uiCard), uiKeys, messages.Add, rawUi);
+            Check(uiCard.Events.SequenceEqual(new[] { "reconnect", "activate" }.Concat(SwitchSequence(32))),
                 "SL1 flow must use the entered keys for all sectors without personalization.");
             Check(messages.All(m => !m.Contains(new string('F', 32)) && !m.Contains(new string('0', 32))), "Logs must not contain entered key values.");
         }
@@ -225,7 +225,7 @@ static class SectorSwitchChecks
             CardPerso.Issue2KbSL1SL3Mix(new MifarePlusController(issuing), useDefaults ? null : keys, useRaw: useRaw);
             Check(issuing.Events.Count(e => e == "write") == 70, "Issuing must write 64 sector keys, five control keys, and B000.");
             Check(issuing.Events.Skip(70).SequenceEqual(new[] { "commit", "reconnect", "activate" }.Concat(SwitchSequence(32))),
-                "Issuing must commit, reconnect, activate ISO-4, then switch all sectors individually.");
+                "Issuing must commit, reconnect, activate ISO-4, and switch all sectors individually.");
         }
         foreach (var fault in new[] { "write", "commit", "reconnect", "activate" })
         {
@@ -245,10 +245,11 @@ static class SectorSwitchChecks
             CardPerso.Issue2KbSL1SL3MixFromCurrentState(new MifarePlusController(issuing));
             Check(issuing.Events[0] == "detect", "Auto flow must inspect activation before mutating the card.");
             if (sak == 0x20)
-                Check(issuing.Events.Count(e => e == "write") == 70 && issuing.Events.Contains("commit"), "SL0 candidate must personalize before switching.");
+                Check(issuing.Events.Skip(71).SequenceEqual(new[] { "commit", "reconnect", "activate" }.Concat(SwitchSequence(32))),
+                    "Auto SL0 flow must commit and complete sector switching after detection and writes.");
             else
                 Check(issuing.Events.SequenceEqual(new[] { "detect", "reconnect", "activate" }.Concat(SwitchSequence(32))),
-                    "SL1-compatible cards must skip all SL0 writes and commit.");
+                    "Auto SL1 flow must continue without rewriting keys or committing.");
         }
         var unsupported = new IssuingCard(zeroKeys) { InitialSak = 0x00 };
         try
@@ -315,7 +316,7 @@ static class SectorSwitchChecks
         public void ReconnectCard()
         {
             Check(Events.LastOrDefault() == "commit" ||
-                (InitialSak is 0x08 or 0x18 && Events.SequenceEqual(new[] { "detect" })),
+                (InitialSak is 0x08 or 0x18 && (Events.Count == 0 || Events.SequenceEqual(new[] { "detect" }))),
                 "Reconnect must follow commit or SL1 detection.");
             Events.Add("reconnect");
             if (Fault == "reconnect") throw new MifarePlusException("Simulated reconnect failure.");

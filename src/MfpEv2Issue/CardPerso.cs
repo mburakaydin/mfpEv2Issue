@@ -6,12 +6,9 @@ namespace MfpEv2Issue
     public static class CardPerso
     {
         /// <summary>
-        /// Issues a 2KB card presented in SL0: WritePerso keys and B000, CommitPerso,
-        /// reconnect/reset, activate ISO 14443-4A, then switch all sectors to mixed mode.
+        /// Writes the 2KB SL0 key profile and B000, commits, then switches all sectors to mixed mode.
         /// Uses zero keys unless a complete 32-sector key set is supplied.
-        /// By default sends sector-switch/reset commands raw after activation, matching pcMfpIssue.
-        /// Set useRaw=false for readers requiring wrapped native commands instead.
-        /// Reader must support the activation APDU and perform the required RF reset.
+        /// Reconnects and activates ISO-4 after commit before authenticating sector switches.
         /// Stops on the first failure; completed card changes cannot be rolled back.
         /// </summary>
         public static void Issue2KbSL1SL3Mix(
@@ -28,8 +25,8 @@ namespace MfpEv2Issue
         }
 
         /// <summary>
-        /// Uses reader ATQA/UID/SAK data to choose the reference application's flow.
-        /// 08/18 are SL1-compatible hints: skip SL0 writes. 20 is ambiguous (SL0 or SL3,
+        /// Uses reader ATQA/UID/SAK data to select the issuing or SL1 continuation flow.
+        /// 08/18 are SL1-compatible hints: skip personalization. 20 is ambiguous (SL0 or SL3,
         /// or customized SL1): attempt SL0 personalization, whose command status is authoritative.
         /// SAK alone does not prove card type or security level. Errors are never treated as success.
         /// </summary>
@@ -46,7 +43,7 @@ namespace MfpEv2Issue
             log?.Invoke($"UID={Convert.ToHexString(card.Uid)} ATQA={Convert.ToHexString(card.Atqa!)} SAK={card.Sak:X2}");
             if (card.Sak is 0x08 or 0x18)
             {
-                log?.Invoke("SL1-compatible activation detected; skipping SL0 key/configuration writes and CommitPerso.");
+                log?.Invoke("SL1-compatible activation detected; skipping SL0 writes and CommitPerso.");
                 Continue2KbSL1ToSL1SL3Mix(ctrl, keySet, log, useRaw);
             }
             else if (card.Sak == 0x20)
@@ -83,7 +80,7 @@ namespace MfpEv2Issue
             log?.Invoke("2KB SL1SL3Mix issuing complete");
         }
 
-        /// <summary>Writes a zero-key mixed-mode profile in SL0, then commits personalization.</summary>
+        /// <summary>Writes a zero-key profile in SL0, then commits personalization.</summary>
         public static void SL0Operations(
             MifarePlusController ctrl,
             Action<string>? log = null,
@@ -111,6 +108,7 @@ namespace MfpEv2Issue
 
             MifarePlusKeys.WriteKeys(ctrl, keySet, log, sectorCount);
             MifarePlusConfiguration.WriteConfigurationBlock(ctrl, block, log);
+            log?.Invoke("WritePerso commands complete. Sending CommitPerso.");
             ctrl.CommitPerso();
             log?.Invoke("CommitPerso OK");
         }
