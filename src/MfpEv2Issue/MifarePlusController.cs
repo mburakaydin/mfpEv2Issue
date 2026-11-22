@@ -110,7 +110,7 @@ namespace MfpEv2Issue
 
     // ---- Controller --------------------------------------------------------
 
-    public class MifarePlusController
+    public partial class MifarePlusController
     {
         private readonly IMifarePlusChannel _channel;
         private readonly RandomNumberGenerator _rng = RandomNumberGenerator.Create();
@@ -127,11 +127,18 @@ namespace MfpEv2Issue
         public FirstAuthResult FirstAuth(
             byte[] key,
             int keyNumber,
-            bool useRaw = false   // default: wrapped Transceive
+            bool useRaw = false,   // default: wrapped Transceive
+            byte[]? pcdCapabilities = null // null: six zero bytes; empty: omit capabilities, as in RFIDDiscover
         )
         {
             if (key == null || key.Length != 16)
                 throw new InvalidInputException("key must be 16 bytes (AES-128)");
+            if (keyNumber < 0 || keyNumber > ushort.MaxValue)
+                throw new InvalidInputException("keyNumber must fit in two bytes");
+            pcdCapabilities ??= new byte[6];
+            if (pcdCapabilities.Length != 0 && pcdCapabilities.Length != 6)
+                throw new InvalidInputException("pcdCapabilities must contain zero or six bytes");
+            _session = new FirstAuthResult();
 
             // choose transport once
             Func<byte[], byte[]> xceive =
@@ -151,9 +158,9 @@ namespace MfpEv2Issue
             sendBuf[pos++] = 0x70;
             sendBuf[pos++] = (byte)(keyNumber & 0x00FF);
             sendBuf[pos++] = (byte)((keyNumber >> 8) & 0x00FF);
-            sendBuf[pos++] = 0x06;
-            for (int i = 0; i < 6; i++)
-                sendBuf[pos++] = 0x00;
+            sendBuf[pos++] = (byte)pcdCapabilities.Length;
+            foreach (byte capability in pcdCapabilities)
+                sendBuf[pos++] = capability;
 
             wCtr = 0;
             rCtr = 0;
@@ -246,7 +253,11 @@ namespace MfpEv2Issue
         public byte[] TransceiveRaw(byte[] apdu)
             => _channel.TransceiveRaw(apdu);
 
-        public void ResetCard() => _channel.ReconnectCard();
+        public void ResetCard()
+        {
+            _session = new FirstAuthResult();
+            _channel.ReconnectCard();
+        }
 
 
         // ---- FirstAuth1 -----------------------------------------------------
@@ -959,13 +970,16 @@ namespace MfpEv2Issue
             if (resp == null || resp.Length < 1)
                 throw new InvalidResponseStatusException(0x00);
 
-            // ---- ISO SW1 SW2 check ----
-            byte sw1 = resp[^1];
-
-            if (sw1 != 0x90)
-                throw new InvalidResponseStatusException(sw1);
-
-            int dataLen = resp.Length - 1;
+            // Accept standard PC/SC 90 00 and the reference reader's legacy single 90.
+            int dataLen;
+            if (resp.Length >= 2 && resp[^2] == 0x90 && resp[^1] == 0x00)
+                dataLen = resp.Length - 2;
+            else if (resp[^1] == 0x90)
+                dataLen = resp.Length - 1;
+            else if (resp.Length >= 2)
+                throw new InvalidResponseStatusException(resp[^2], resp[^1]);
+            else
+                throw new InvalidResponseStatusException(resp[0]);
             if (dataLen <= 0)
                 throw new Exception("Empty PICC data");
 
@@ -983,7 +997,7 @@ namespace MfpEv2Issue
             }
 
             // Type A → ATQA(2) + UID(4/7/10) + SAK(1)
-            if (data.Length >= 7) // minimum 2 + 4 + 1
+            if (data.Length is 7 or 10 or 13) // ATQA + 4/7/10-byte UID + SAK
             {
                 byte[] atqa = data.Take(2).ToArray();
                 byte sak = data[^1];
